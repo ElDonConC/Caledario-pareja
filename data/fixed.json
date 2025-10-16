@@ -1,0 +1,31 @@
+[
+    {
+        "id": "38457fb134c2",
+        "label": "Trabajo ING",
+        "who": "el",
+        "days": [
+            "1",
+            "2",
+            "3",
+            "4"
+        ],
+        "start": "07:00",
+        "end": "16:30",
+        "location": "Goodyear",
+        "date_start": null,
+        "date_end": null
+    },
+    {
+        "id": "dc52f94c4f46",
+        "label": "Trabajo ING",
+        "who": "el",
+        "days": [
+            "5"
+        ],
+        "start": "07:00",
+        "end": "15:30",
+        "location": "Goodyear",
+        "date_start": null,
+        "date_end": null
+    }
+]
