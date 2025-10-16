@@ -1,34 +1,59 @@
 <?php
 /*
  * Pareja Planner – PHP plano, un solo archivo, sin DB.
- * Guarda tareas en data/tasks.json y bloques fijos en data/fixed.json
+ * ----------------------------------------------------
+ * - Guarda tareas en data/tasks.json y bloques fijos en data/fixed.json
+ * - Usa "Él / Ella / Ambos" (keys: el/ella/ambos).
+ * - Compatibilidad con datos antiguos: yo->el, pareja->ella.
+ * - Admin de bloques fijos con PIN (simple).
  *
- * Usa "Él / Ella / Ambos" (keys: el/ella/ambos).
- * Compatibilidad con datos antiguos: yo->el, pareja->ella.
- * Admin de bloques fijos con PIN (simple).
+ * VISIBILIDAD:
+ * - Los bloques fijos y las píldoras del calendario SOLO se muestran
+ *   al usuario actual si son "ambos" o coinciden con su vista (el/ella).
  *
- * NUEVO: Los bloques fijos y las píldoras del calendario
- *        SOLO se muestran al usuario actual si son "ambos"
- *        o coinciden con su vista (el/ella). Así no “ensucia”
- *        el calendario de la otra persona.
+ * MOVIL/UX:
+ * - Cabecera pegada (sticky), navegación horizontal con scroll suave.
+ * - Controles grandes y espaciados para toque (touch friendly).
+ * - Rejilla del calendario a 7/4/2/1 columnas según ancho.
+ * - Botones se apilan y ocupan ancho completo en móvil.
+ * - Estados :focus-visible para accesibilidad con teclado.
  */
 
 declare(strict_types=1);
 
-# ======================= CONFIG =======================
-const DATA_DIR    = __DIR__ . '/data';
-const TASKS_FILE  = DATA_DIR . '/tasks.json';
-const FIXED_FILE  = DATA_DIR . '/fixed.json';
-const APP_TITLE   = 'Pareja Planner';
-const TZ_NAME     = 'America/Santiago';
-const ADMIN_PIN   = 'teamo'; // cambia el PIN
+/* ======================= CONFIG ======================= */
 
-# ====================== UTILIDAD ======================
+/** Directorio donde se guardan los JSON */
+const DATA_DIR    = __DIR__ . '/data';
+/** Ruta del archivo de tareas */
+const TASKS_FILE  = DATA_DIR . '/tasks.json';
+/** Ruta del archivo de bloques fijos */
+const FIXED_FILE  = DATA_DIR . '/fixed.json';
+/** Título de la app (cabecera y <title>) */
+const APP_TITLE   = 'Pareja Planner';
+/** Zona horaria (CL: America/Santiago) */
+const TZ_NAME     = 'America/Santiago';
+/** PIN de administración para gestionar bloques fijos */
+const ADMIN_PIN   = 'teamo'; // cámbialo por seguridad
+
+/* ====================== UTILIDAD ====================== */
+
+/** Escapa HTML seguro */
 function h(string $s): string { return htmlspecialchars($s, ENT_QUOTES, 'UTF-8'); }
+
+/** Devuelve la zona horaria configurada */
 function tz(): DateTimeZone { return new DateTimeZone(TZ_NAME); }
+
+/** DateTime "ahora" con TZ */
 function now(): DateTime { return new DateTime('now', tz()); }
+
+/** Fecha de hoy (Y-m-d) */
 function today(): string { return now()->format('Y-m-d'); }
 
+/**
+ * Lee JSON de forma segura.
+ * - Si no existe o está corrupto, devuelve $default sin romper la app.
+ */
 function safe_json_read(string $file, $default) {
     if (!is_file($file)) return $default;
     $json = @file_get_contents($file);
@@ -36,6 +61,12 @@ function safe_json_read(string $file, $default) {
     $data = json_decode($json, true);
     return is_array($data) ? $data : $default;
 }
+
+/**
+ * Escribe JSON de forma segura.
+ * - Crea la carpeta /data si no existe.
+ * - Usa flock para evitar corrupción si dos peticiones escriben a la vez.
+ */
 function safe_json_write(string $file, $value): bool {
     if (!is_dir(DATA_DIR)) { @mkdir(DATA_DIR, 0775, true); }
     $fp = fopen($file, 'c+');
@@ -49,6 +80,9 @@ function safe_json_write(string $file, $value): bool {
     return $ok;
 }
 
+/**
+ * Normaliza "quién" (el/ella/ambos) y soporta claves antiguas (yo/pareja).
+ */
 function normalize_who($w): string {
     $w = strtolower(trim((string)$w));
     if ($w === 'yo')      return 'el';     // legacy
@@ -57,24 +91,34 @@ function normalize_who($w): string {
     return 'ambos';
 }
 
+/** Carga tareas del JSON y normaliza el campo who */
 function tasks_load(): array {
     $arr = safe_json_read(TASKS_FILE, []);
     foreach ($arr as &$t) { $t['who'] = normalize_who($t['who'] ?? 'ambos'); }
     unset($t);
     return $arr;
 }
+
+/** Guarda el arreglo de tareas en JSON */
 function tasks_save(array $arr): bool { return safe_json_write(TASKS_FILE, $arr); }
 
+/** Carga bloques fijos del JSON y normaliza el campo who */
 function fixed_load(): array {
     $arr = safe_json_read(FIXED_FILE, []);
     foreach ($arr as &$b) { $b['who'] = normalize_who($b['who'] ?? 'ambos'); }
     unset($b);
     return $arr;
 }
+
+/** Guarda el arreglo de bloques fijos en JSON */
 function fixed_save(array $arr): bool { return safe_json_write(FIXED_FILE, $arr); }
 
+/** Genera un ID corto (12 hex) para tareas/bloques */
 function gen_id(): string { return bin2hex(random_bytes(6)); }
 
+/**
+ * Devuelve el rango (DateTime) de la semana actual (Lunes 00:00 a Domingo 23:59:59)
+ */
 function week_range(): array {
     $d = now();
     $dow = (int)$d->format('N'); // 1..7 (Lun..Dom)
@@ -82,6 +126,8 @@ function week_range(): array {
     $sunday = (clone $monday)->modify('+6 days')->setTime(23,59,59);
     return [$monday, $sunday];
 }
+
+/** True si la fecha Y-m-d cae dentro de la semana actual */
 function in_week(?string $date): bool {
     if (!$date) return false;
     [$mon,$sun] = week_range();
@@ -90,8 +136,17 @@ function in_week(?string $date): bool {
     $dt->setTime(12,0,0);
     return ($dt >= $mon && $dt <= $sun);
 }
+
+/** True si la fecha Y-m-d es hoy */
 function is_today(?string $date): bool { return $date === today(); }
 
+/**
+ * Ordenamiento de tareas:
+ * 1) fijas primero, luego pendientes, luego hechas
+ * 2) por fecha (vacías al final)
+ * 3) prioridad (alta > media > baja)
+ * 4) más nuevas primero (created_at desc)
+ */
 function compare_tasks(array $a, array $b): int {
     $orderStatus = ['fijo'=>-1,'pendiente'=>0,'hecho'=>1];
     $pa = $orderStatus[$a['status']] ?? 2;
@@ -112,21 +167,26 @@ function compare_tasks(array $a, array $b): int {
     return strcmp($b['created_at'] ?? '', $a['created_at'] ?? '');
 }
 
+/** Asegura que la sesión esté activa (para CSRF y modo admin) */
 function ensure_session(): void {
     if (session_status() !== PHP_SESSION_ACTIVE) session_start();
 }
+
+/** Genera/recupera token CSRF */
 function csrf_token(): string {
     ensure_session();
     if (empty($_SESSION['csrf'])) $_SESSION['csrf'] = bin2hex(random_bytes(16));
     return $_SESSION['csrf'];
 }
+
+/** Verifica token CSRF en POST, si falla responde 400 */
 function check_csrf(): void {
     ensure_session();
     $ok = isset($_POST['csrf']) && hash_equals($_SESSION['csrf'] ?? '', $_POST['csrf']);
     if (!$ok) { http_response_code(400); exit('CSRF inválido'); }
 }
 
-/** Año/mes actual (con navegación) */
+/** Año/mes actual con navegación por query (?y=YYYY&m=M) */
 function current_year_month(): array {
     $y = isset($_GET['y']) ? (int)$_GET['y'] : (int)now()->format('Y');
     $m = isset($_GET['m']) ? (int)$_GET['m'] : (int)now()->format('n');
@@ -134,7 +194,11 @@ function current_year_month(): array {
     if ($m > 12) { $m = 1; $y += 1; }
     return [$y,$m];
 }
-/** Grilla mensual (6x7) */
+
+/**
+ * Construye grilla de 6x7 (42 días) para el mes indicado.
+ * - Cada celda contiene: date, in_month, is_today
+ */
 function build_month_grid(int $year, int $month): array {
     $first = new DateTime(sprintf('%04d-%02d-01', $year, $month), tz());
     $startDow = (int)$first->format('N'); // 1..7 (Lun..Dom)
@@ -142,35 +206,49 @@ function build_month_grid(int $year, int $month): array {
     $grid = [];
     for ($i=0; $i<42; $i++) {
         $d = (clone $start)->modify("+$i days");
-        $grid[] = ['date'=>$d->format('Y-m-d'), 'in_month'=>((int)$d->format('n')===$month), 'is_today'=>($d->format('Y-m-d')===today())];
+        $grid[] = [
+            'date'=>$d->format('Y-m-d'),
+            'in_month'=>((int)$d->format('n')===$month),
+            'is_today'=>($d->format('Y-m-d')===today())
+        ];
     }
     return $grid;
 }
+
+/** Corta texto para píldoras del calendario */
 function cut(string $s, int $max=22): string {
     $s = trim($s);
     return mb_strlen($s) <= $max ? $s : (mb_substr($s,0,$max-1).'…');
 }
 
-/* Aceptar strings "1".."7" además de enteros y nombres */
+/**
+ * Normaliza día de la semana a entero 1..7
+ * - Acepta "1".."7", "lun..dom", "mon..sun" y variantes.
+ */
 function normalize_day($d): ?int {
     if (is_int($d) || (is_string($d) && ctype_digit($d))) {
         $n = (int)$d;
         return ($n >= 1 && $n <= 7) ? $n : null;
     }
-    $map = ['mon'=>1,'tue'=>2,'wed'=>3,'thu'=>4,'fri'=>5,'sat'=>6,'sun'=>7,
-            'lun'=>1,'mar'=>2,'mie'=>3,'mié'=>3,'jue'=>4,'vie'=>5,'sab'=>6,'sáb'=>6,'dom'=>7];
+    $map = [
+        'mon'=>1,'tue'=>2,'wed'=>3,'thu'=>4,'fri'=>5,'sat'=>6,'sun'=>7,
+        'lun'=>1,'mar'=>2,'mie'=>3,'mié'=>3,'jue'=>4,'vie'=>5,'sab'=>6,'sáb'=>6,'dom'=>7
+    ];
     $k = strtolower((string)$d);
     return $map[$k] ?? null;
 }
 
-/* === Regla de visibilidad por vista (el/ella/ambos) === */
+/** True si un item (quién) es visible para la vista actual (el/ella/ambos) */
 function visible_for_user(string $itemWho, string $currentUser): bool {
     $itemWho = normalize_who($itemWho);
     $currentUser = normalize_who($currentUser);
     return $itemWho === 'ambos' || $itemWho === $currentUser;
 }
 
-/** Bloques fijos aplicables a una fecha (sin filtrar por usuario) */
+/**
+ * Devuelve bloques fijos aplicables a una fecha (sin filtrar por usuario)
+ * - Verifica días de semana y rango opcional de fechas.
+ */
 function fixed_blocks_for_date(string $ymd): array {
     $all = fixed_load();
     if (!$all) return [];
@@ -181,10 +259,12 @@ function fixed_blocks_for_date(string $ymd): array {
     foreach ($all as $b) {
         $days = array_values(array_filter(array_map('normalize_day', (array)($b['days'] ?? []))));
         if (!$days || !in_array($dow, $days, true)) continue;
+
         $okRange = true;
         if (!empty($b['date_start'])) $okRange = $okRange && ($ymd >= $b['date_start']);
         if (!empty($b['date_end']))   $okRange = $okRange && ($ymd <= $b['date_end']);
         if (!$okRange) continue;
+
         $out[] = [
             'label'=>$b['label'], 'who'=>$b['who'], 'date'=>$ymd,
             'start'=>$b['start'], 'end'=>$b['end'], 'location'=>$b['location'] ?? '',
@@ -192,7 +272,11 @@ function fixed_blocks_for_date(string $ymd): array {
     }
     return $out;
 }
-/** Igual que la anterior pero filtrada por usuario visible (evita “ensuciar” vistas) */
+
+/**
+ * Igual que la anterior pero filtrada por usuario visible (el/ella/ambos).
+ * - Evita “ensuciar” vistas con bloques del otro.
+ */
 function fixed_blocks_for_date_user(string $ymd, string $currentUser): array {
     return array_values(array_filter(
         fixed_blocks_for_date($ymd),
@@ -200,46 +284,84 @@ function fixed_blocks_for_date_user(string $ymd, string $currentUser): array {
     ));
 }
 
-# ======================== RUTEO ========================
+/* ======================== RUTEO ======================== */
+
 ensure_session();
+
+/** Acción solicitada (por query o post) */
 $action = $_POST['action'] ?? $_GET['action'] ?? 'list';
-$filter = $_GET['filter'] ?? 'semana';     // hoy | semana | todas
-$view   = $_GET['view']   ?? 'lista';      // lista | calendario
-$user   = normalize_who($_GET['user'] ?? 'ambos'); // el | ella | ambos
+/** Filtro de listado: hoy | semana | todas */
+$filter = $_GET['filter'] ?? 'semana';
+/** Vista: lista | calendario */
+$view   = $_GET['view']   ?? 'lista';
+/** Vista de usuario: el | ella | ambos */
+$user   = normalize_who($_GET['user'] ?? 'ambos');
+/** Token CSRF */
 $csrf   = csrf_token();
 
-# ======================= ACCIONES ======================
+/* ======================= ACCIONES ====================== */
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    /* ---------- Login/Logout admin ---------- */
 
     if ($action === 'admin_login') {
         check_csrf();
         $pin = trim($_POST['pin'] ?? '');
-        if (hash_equals(ADMIN_PIN, $pin)) { $_SESSION['admin_ok'] = true; header('Location: ?msg=Admin+OK#fixed'); exit; }
+        if (hash_equals(ADMIN_PIN, $pin)) {
+            $_SESSION['admin_ok'] = true;
+            header('Location: ?msg=Admin+OK#fixed'); exit;
+        }
         header('Location: ?msg=PIN+incorrecto#fixed'); exit;
     }
+
     if ($action === 'admin_logout') {
-        check_csrf(); unset($_SESSION['admin_ok']); header('Location: ?msg=Admin+salio#fixed'); exit;
+        check_csrf();
+        unset($_SESSION['admin_ok']);
+        header('Location: ?msg=Admin+salio#fixed'); exit;
     }
+
+    /* ---------- CRUD de bloques fijos ---------- */
+
     if ($action === 'fixed_create') {
-        check_csrf(); if (empty($_SESSION['admin_ok'])) { http_response_code(403); exit('PIN requerido'); }
-        $label=trim($_POST['label']??''); $who=normalize_who($_POST['who']??'ambos');
-        $start=$_POST['start']??''; $end=$_POST['end']??''; $loc=trim($_POST['location']??'');
-        $ds=$_POST['date_start']??''; $de=$_POST['date_end']??''; $days=$_POST['days']??[];
-        if ($label===''||$start===''||$end===''||!$days){ header('Location:?msg=Faltan+datos+del+bloque#fixed'); exit; }
-        $all=fixed_load();
-        $all[]=['id'=>gen_id(),'label'=>$label,'who'=>$who,'days'=>array_values($days),
-                'start'=>$start,'end'=>$end,'location'=>$loc,
-                'date_start'=>$ds!==''?$ds:null,'date_end'=>$de!==''?$de:null];
-        fixed_save($all); header('Location:?msg=Bloque+fijo+creado#fixed'); exit;
+        check_csrf();
+        if (empty($_SESSION['admin_ok'])) { http_response_code(403); exit('PIN requerido'); }
+
+        $label = trim($_POST['label'] ?? '');
+        $who   = normalize_who($_POST['who'] ?? 'ambos');
+        $start = $_POST['start'] ?? '';
+        $end   = $_POST['end'] ?? '';
+        $loc   = trim($_POST['location'] ?? '');
+        $ds    = $_POST['date_start'] ?? '';
+        $de    = $_POST['date_end'] ?? '';
+        $days  = $_POST['days'] ?? [];
+
+        if ($label==='' || $start==='' || $end==='' || !$days) {
+            header('Location:?msg=Faltan+datos+del+bloque#fixed'); exit;
+        }
+
+        $all = fixed_load();
+        $all[] = [
+            'id'=>gen_id(),'label'=>$label,'who'=>$who,'days'=>array_values($days),
+            'start'=>$start,'end'=>$end,'location'=>$loc,
+            'date_start'=>$ds!==''?$ds:null,'date_end'=>$de!==''?$de:null
+        ];
+        fixed_save($all);
+        header('Location:?msg=Bloque+fijo+creado#fixed'); exit;
     }
+
     if ($action === 'fixed_delete') {
-        check_csrf(); if (empty($_SESSION['admin_ok'])) { http_response_code(403); exit('PIN requerido'); }
-        $id=$_POST['id']??''; $all=fixed_load();
-        $all=array_values(array_filter($all,fn($b)=>($b['id']??'')!==$id)); fixed_save($all);
+        check_csrf();
+        if (empty($_SESSION['admin_ok'])) { http_response_code(403); exit('PIN requerido'); }
+        $id  = $_POST['id'] ?? '';
+        $all = fixed_load();
+        $all = array_values(array_filter($all, fn($b)=>($b['id']??'')!==$id));
+        fixed_save($all);
         header('Location:?msg=Bloque+fijo+eliminado#fixed'); exit;
     }
 
-    // Tareas
+    /* ---------- CRUD de tareas ---------- */
+
     if (in_array($action, ['create','toggle','delete','edit'], true)) {
         check_csrf();
         $tasks = tasks_load();
@@ -248,25 +370,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $title = trim($_POST['title'] ?? '');
             if ($title === '') { header('Location: ?msg=Titulo+requerido'); exit; }
             $task = [
-                'id'=>gen_id(),'title'=>$title,'notes'=>trim($_POST['notes']??''),
+                'id'=>gen_id(),
+                'title'=>$title,
+                'notes'=>trim($_POST['notes']??''),
                 'who'=>normalize_who($_POST['who']??'ambos'),
-                'priority'=>$_POST['priority']??'media','date'=>($_POST['date']??'')?:'',
-                'time'=>($_POST['time']??'')?:'','status'=>'pendiente',
+                'priority'=>$_POST['priority']??'media',
+                'date'=>($_POST['date']??'')?:'',
+                'time'=>($_POST['time']??'')?:'',
+                'status'=>'pendiente',
                 'created_at'=>now()->format('Y-m-d H:i:s')
             ];
-            $tasks[]=$task; tasks_save($tasks);
+            $tasks[]=$task;
+            tasks_save($tasks);
             header('Location: ?msg=Tarea+creada'); exit;
         }
+
         if ($action==='toggle') {
-            $id=$_POST['id']??''; foreach($tasks as &$t){ if($t['id']===$id){ $t['status']=$t['status']==='hecho'?'pendiente':'hecho'; break; } }
-            unset($t); tasks_save($tasks); header('Location: ?msg=Estado+actualizado'); exit;
+            $id=$_POST['id']??'';
+            foreach($tasks as &$t){
+                if($t['id']===$id){
+                    $t['status']=$t['status']==='hecho'?'pendiente':'hecho';
+                    break;
+                }
+            }
+            unset($t);
+            tasks_save($tasks);
+            header('Location: ?msg=Estado+actualizado'); exit;
         }
+
         if ($action==='delete') {
-            $id=$_POST['id']??''; $tasks=array_values(array_filter($tasks,fn($t)=>$t['id']!==$id));
-            tasks_save($tasks); header('Location: ?msg=Tarea+eliminada'); exit;
+            $id=$_POST['id']??'';
+            $tasks=array_values(array_filter($tasks,fn($t)=>$t['id']!==$id));
+            tasks_save($tasks);
+            header('Location: ?msg=Tarea+eliminada'); exit;
         }
+
         if ($action==='edit') {
-            $id=$_POST['id']??''; foreach($tasks as &$t){
+            $id=$_POST['id']??'';
+            foreach($tasks as &$t){
                 if($t['id']===$id){
                     $t['title']=trim($_POST['title']??$t['title']);
                     $t['notes']=trim($_POST['notes']??$t['notes']);
@@ -277,34 +418,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     break;
                 }
             }
-            unset($t); tasks_save($tasks); header('Location: ?msg=Tarea+actualizada'); exit;
+            unset($t);
+            tasks_save($tasks);
+            header('Location: ?msg=Tarea+actualizada'); exit;
         }
     }
 
     http_response_code(400); exit('Acción no válida');
 }
 
-# ===================== CARGA ESTADO ====================
+/* ===================== CARGA ESTADO ==================== */
+
 $tasks = tasks_load();
 usort($tasks, 'compare_tasks');
 
+/** Aplica filtro (hoy/semana/todas) */
 $filtered = array_filter($tasks, function ($t) use ($filter) {
-    if ($filter==='hoy') return is_today($t['date']??null);
+    if ($filter==='hoy')    return is_today($t['date']??null);
     if ($filter==='semana') return in_week($t['date']??null);
     return true;
 });
+/** Mensaje flash en query */
 $msg = $_GET['msg'] ?? null;
 
-# Theme por user
+/** Tema visual en función de la vista de usuario */
 $theme = $user==='ella' ? 'ella' : ($user==='el' ? 'el' : 'neutral');
 
-# Calendario
+/** Datos para calendario */
 [$Y,$M] = current_year_month();
 $grid = build_month_grid($Y,$M);
+/** Indexa tareas por fecha para pintar en celdas del calendario */
 $byDate = [];
 foreach ($tasks as $t) {
     $d = $t['date'] ?? '';
     if ($d==='') continue;
+    // NOTA: En calendario mostramos TODO (pero los fijos se filtran por user)
     $byDate[$d][] = $t;
 }
 ?>
@@ -312,13 +460,19 @@ foreach ($tasks as $t) {
 <html lang="es">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- Viewport adaptado a móvil. Evitamos zoom inicial y respetamos "viewport-fit" para iPhone con notch -->
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
 <title><?=h(APP_TITLE)?> – <?=h(ucfirst($view))?></title>
 <style>
+/* ===================== THEME TOKENS ===================== */
 :root{
   --bg:#0f1220; --card:#171b2e; --ink:#e8ecff; --muted:#aab2d8;
   --ok:#6ef3a5; --warn:#ffd166; --err:#ff6b6b; --link:#9cc1ff;
   --chip:#212745; --line:#2a3256; --btn:#0c1028; --accent:#8fb2ff;
+  --tap:48px;                 /* tamaño mínimo táctil */
+  --radius:16px;
+  --gap:12px;
+  --font: clamp(14px, 1.6vw, 16px); /* fuente fluida para móvil/desktop */
 }
 /* Tema Ella (rosadito/ternura) */
 body.theme-ella{
@@ -330,31 +484,82 @@ body.theme-el{
   --bg:#0e1116; --card:#141920; --ink:#e6edf3; --muted:#a4b1c3;
   --link:#9cc1ff; --chip:#18202a; --line:#243040; --btn:#0f151d; --accent:#6aa0ff;
 }
+
+/* ===================== BASE / LAYOUT ===================== */
 *{box-sizing:border-box;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
 html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--ink);}
-.container{max-width:1100px;margin:24px auto;padding:16px;}
-.header{position:sticky;top:0;background:linear-gradient(180deg,rgba(0,0,0,.35),transparent);backdrop-filter:saturate(120%) blur(6px);z-index:5;border-radius:0 0 16px 16px;padding-bottom:8px}
-.header-inner{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
-h1{margin:0;font-size:24px;letter-spacing:.3px}
-/* Nav */
+body{
+  margin:0;background:var(--bg);color:var(--ink);font-size:var(--font);
+  -webkit-tap-highlight-color: transparent;
+}
+.container{max-width:1100px;margin:24px auto;padding:16px}
+.header{
+  position:sticky;top:0;z-index:5;padding-bottom:8px;
+  background:linear-gradient(180deg,rgba(0,0,0,.35),transparent);
+  backdrop-filter:saturate(120%) blur(6px); border-radius:0 0 var(--radius) var(--radius)
+}
+.header-inner{
+  display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap
+}
+h1{margin:0;font-size:clamp(20px,2.5vw,24px);letter-spacing:.3px}
+
+/* ===================== NAVS ===================== */
 .nav, .who{display:flex;gap:8px;flex-wrap:wrap}
-@media (max-width: 640px){ .nav, .who{flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px} .nav::-webkit-scrollbar,.who::-webkit-scrollbar{display:none} }
-.nav a, .who a{color:var(--ink);text-decoration:none;padding:10px 14px;border-radius:12px;background:var(--chip);border:1px solid var(--line);font-size:14px;white-space:nowrap}
+@media (max-width: 640px){
+  .nav, .who{
+    flex-wrap:nowrap;overflow-x:auto;padding-bottom:6px;scroll-behavior:smooth
+  }
+  .nav::-webkit-scrollbar,.who::-webkit-scrollbar{display:none}
+}
+.nav a, .who a{
+  color:var(--ink);text-decoration:none;padding:10px 14px;border-radius:12px;
+  background:var(--chip);border:1px solid var(--line);font-size:14px;white-space:nowrap
+}
 .nav a.active, .who a.active{outline:2px solid var(--accent)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin-top:16px}
-/* Formularios */
+
+/* ===================== CARDS ===================== */
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-top:16px
+}
+
+/* ===================== FORM CONTROLS ===================== */
 .form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .form-row-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
-@media (max-width: 900px){ .form-row{grid-template-columns:1fr} .form-row-3{grid-template-columns:1fr} }
-input[type=text], textarea, select, input[type=date], input[type=time], input[type=password]{
-  width:100%;padding:12px;border-radius:12px;border:1px solid var(--line);background:var(--btn);color:var(--ink)
+@media (max-width: 900px){
+  .form-row{grid-template-columns:1fr}
+  .form-row-3{grid-template-columns:1fr}
 }
-button{padding:12px 16px;border-radius:12px;border:1px solid var(--line);background:var(--btn);color:var(--ink);cursor:pointer}
-button.primary{background:linear-gradient(180deg,var(--accent),#3a4a7a);border-color:#2a3568;color:#091221}
+input[type=text], textarea, select, input[type=date], input[type=time], input[type=password]{
+  width:100%;padding:12px;min-height:var(--tap);
+  border-radius:12px;border:1px solid var(--line);background:var(--btn);color:var(--ink)
+}
+button{
+  padding:12px 16px;min-height:var(--tap);
+  border-radius:12px;border:1px solid var(--line);background:var(--btn);color:var(--ink);cursor:pointer
+}
+button.primary{
+  background:linear-gradient(180deg,var(--accent),#3a4a7a);
+  border-color:#2a3568;color:#091221
+}
+
+/* Estados de foco visibles para accesibilidad */
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible{
+  outline:2px solid var(--accent);outline-offset:2px
+}
+
+/* En móvil, botones se apilan y toman el ancho */
+@media (max-width: 640px){
+  .actions{width:100%}
+  .actions > *{width:100%}
+}
+
+/* Badges / chips */
 .badge{padding:6px 10px;border-radius:999px;border:1px solid var(--line);background:var(--chip);font-size:12px;color:var(--muted)}
 .list{display:flex;flex-direction:column;gap:10px}
-.item{display:flex;gap:12px;align-items:flex-start;justify-content:space-between;padding:12px;border:1px dashed var(--line);border-radius:12px;background:rgba(255,255,255,.02)}
+.item{
+  display:flex;gap:12px;align-items:flex-start;justify-content:space-between;
+  padding:12px;border:1px dashed var(--line);border-radius:12px;background:rgba(255,255,255,.02)
+}
 @media (max-width: 640px){ .item{flex-direction:column;gap:8px} }
 .meta{display:flex;flex-wrap:wrap;gap:6px}
 .title{font-weight:600}
@@ -366,37 +571,68 @@ hr{border:0;border-top:1px solid var(--line);margin:12px 0}
 footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
 .inline{display:inline}
 .actions{display:flex;gap:6px;flex-wrap:wrap}
-/* Etiquetas */
+
+/* Etiquetas por “quién” y prioridad */
 .tag-el{background:#13273a;border-color:#27405a;color:#9cc1ff}
 .tag-ella{background:#3a1b2e;border-color:#5a2a4a;color:#ff9ec7}
 .tag-ambos{background:#242a3a;border-color:#3a4a6a;color:#b7c7ff}
 .prio-alta{background:#3a1a1a;border-color:#6a2a2a;color:#ff9c9c}
 .prio-media{background:#2d2a3a;border-color:#46406a;color:#c1b8ff}
 .prio-baja{background:#20322a;border-color:#335a48;color:#a7f1c7}
-/* Calendario */
+
+/* ===================== CALENDARIO ===================== */
 .cal-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap}
-.cal-head a{padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--chip);text-decoration:none;color:var(--ink)}
+.cal-head a{
+  padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--chip);
+  text-decoration:none;color:var(--ink);min-height:var(--tap);display:inline-flex;align-items:center
+}
 .weekdays{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:6px}
 .weekdays div{font-size:12px;color:var(--muted);text-align:center}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:8px}
-@media (max-width: 1024px){ .cal-grid{grid-template-columns:repeat(4,1fr)} .weekdays{grid-template-columns:repeat(4,1fr)} .weekdays div:nth-child(n+5){display:none} }
-@media (max-width: 540px){ .cal-grid{grid-template-columns:repeat(2,1fr)} .weekdays{grid-template-columns:repeat(2,1fr)} .weekdays div:nth-child(n+3){display:none} }
-.cal-cell{border:1px solid var(--line);border-radius:12px;min-height:110px;padding:8px;background:var(--card)}
+
+/* Reflujo progresivo de columnas en pantallas más estrechas */
+@media (max-width: 1024px){
+  .cal-grid{grid-template-columns:repeat(4,1fr)}
+  .weekdays{grid-template-columns:repeat(4,1fr)}
+  .weekdays div:nth-child(n+5){display:none}
+}
+@media (max-width: 540px){
+  .cal-grid{grid-template-columns:repeat(2,1fr)}
+  .weekdays{grid-template-columns:repeat(2,1fr)}
+  .weekdays div:nth-child(n+3){display:none}
+}
+/* Extra pequeño: 1 columna (muy legible en teléfonos chicos) */
+@media (max-width: 360px){
+  .cal-grid{grid-template-columns:1fr}
+  .weekdays{display:none}
+}
+
+.cal-cell{
+  border:1px solid var(--line);border-radius:12px;min-height:110px;padding:8px;background:var(--card)
+}
 @media (max-width: 540px){ .cal-cell{min-height:90px} }
 .cal-out{opacity:.45}
 .cal-date{font-size:12px;color:var(--muted)}
 .cal-today{outline:2px solid var(--accent)}
 .cal-list{margin-top:6px;display:flex;flex-direction:column;gap:6px}
-.cal-pill{font-size:12px;padding:4px 6px;border-radius:999px;border:1px solid var(--line);display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cal-pill{
+  font-size:12px;padding:6px 8px;border-radius:999px;border:1px solid var(--line);
+  display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+}
 .cal-pill.el{background:#13273a;border-color:#27405a;color:#9cc1ff}
 .cal-pill.ella{background:#3a1b2e;border-color:#5a2a4a;color:#ff9ec7}
 .cal-pill.ambos{background:#242a3a;border-color:#3a4a6a;color:#b7c7ff}
-/* Bloques fijos */
+
+/* ===================== BLOQUES FIJOS ===================== */
 .fixed-wrap{display:flex;flex-direction:column;gap:8px;margin-top:8px}
-.fixed-item{display:flex;gap:10px;align-items:center;background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;padding:10px}
+.fixed-item{
+  display:flex;gap:10px;align-items:center;background:rgba(255,255,255,.03);
+  border:1px solid var(--line);border-radius:12px;padding:10px
+}
 .fixed-badge{font-size:12px;padding:4px 8px;border-radius:999px;background:#2a2030;border:1px solid #4a3a50;color:#ffb3d0}
 .fixed-time{font-size:12px;color:var(--muted)}
-/* Admin */
+
+/* ===================== ADMIN ===================== */
 .admin-card{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
 .table{width:100%;border-collapse:separate;border-spacing:0 8px}
 .table td,.table th{padding:8px 10px;border-bottom:1px solid var(--line)}
@@ -408,75 +644,87 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
 <?php $themeClass = $theme==='ella' ? 'theme-ella' : ($theme==='el' ? 'theme-el' : ''); ?>
 <body class="<?=h($themeClass)?>">
 <div class="container">
-  <div class="header">
+  <!-- ========= CABECERA / NAV ========= -->
+  <div class="header" role="banner">
     <div class="header-inner">
       <h1 style="padding:6px 0"><?=h(APP_TITLE)?></h1>
+
+      <!-- Navegación de filtros y vistas (horizontal scroll en móvil) -->
       <div style="display:flex;gap:12px;flex-wrap:wrap;max-width:100%">
-        <nav class="nav">
+        <nav class="nav" aria-label="Filtros">
           <a href="?filter=hoy&view=lista&user=<?=h($user)?>"   class="<?= $filter==='hoy'    && $view==='lista'?'active':'' ?>">Hoy</a>
           <a href="?filter=semana&view=lista&user=<?=h($user)?>" class="<?= $filter==='semana' && $view==='lista'?'active':'' ?>">Semana</a>
           <a href="?filter=todas&view=lista&user=<?=h($user)?>"  class="<?= $filter==='todas'  && $view==='lista'?'active':'' ?>">Todas</a>
           <a href="?view=calendario&user=<?=h($user)?>"          class="<?= $view==='calendario'?'active':'' ?>">Calendario</a>
           <a href="#fixed">🔒 Fijos</a>
         </nav>
-        <nav class="who">
-          <a href="?view=<?=h($view)?>&filter=<?=h($filter)?>&user=ella" class="<?= $user==='ella'?'active':'' ?>">Ella 💗</a>
-          <a href="?view=<?=h($view)?>&filter=<?=h($filter)?>&user=el"   class="<?= $user==='el'  ?'active':'' ?>">Él 💼</a>
+
+        <!-- Selector de vista por usuario (colores de tema distintos) -->
+        <nav class="who" aria-label="Vista por usuario">
+          <a href="?view=<?=h($view)?>&filter=<?=h($filter)?>&user=ella"  class="<?= $user==='ella'?'active':'' ?>">Ella 💗</a>
+          <a href="?view=<?=h($view)?>&filter=<?=h($filter)?>&user=el"    class="<?= $user==='el'  ?'active':'' ?>">Él 💼</a>
           <a href="?view=<?=h($view)?>&filter=<?=h($filter)?>&user=ambos" class="<?= $user==='ambos'?'active':'' ?>">Ambos 👥</a>
         </nav>
       </div>
     </div>
   </div>
 
-  <?php if ($msg): ?><div class="msg"><?=h($msg)?></div><?php endif; ?>
+  <!-- Mensajes flash -->
+  <?php if ($msg): ?><div class="msg" role="status"><?=h($msg)?></div><?php endif; ?>
 
-  <div class="card">
-    <h3 style="margin-top:0">Nueva tarea</h3>
+  <!-- ========= FORM NUEVA TAREA ========= -->
+  <div class="card" aria-labelledby="nueva-tarea">
+    <h3 id="nueva-tarea" style="margin-top:0">Nueva tarea</h3>
     <form method="post">
       <input type="hidden" name="csrf" value="<?=h($csrf)?>">
       <input type="hidden" name="action" value="create">
-      <div class="form-row">
+
+      <div class="form-row" aria-label="Campos principales">
         <div>
-          <label>Título *</label>
-          <input type="text" name="title" required placeholder="Ej: Comprar entradas cine">
+          <label for="title">Título *</label>
+          <input id="title" type="text" name="title" required placeholder="Ej: Comprar entradas cine" autocomplete="off">
         </div>
         <div>
-          <label>¿Para quién?</label>
-          <select name="who">
+          <label for="who">¿Para quién?</label>
+          <select id="who" name="who">
             <option value="ambos" <?= $user==='ambos'?'selected':'' ?>>Ambos</option>
             <option value="el"    <?= $user==='el'?'selected':'' ?>>Él</option>
             <option value="ella"  <?= $user==='ella'?'selected':'' ?>>Ella</option>
           </select>
         </div>
       </div>
-      <div class="form-row-3" style="margin-top:10px">
+
+      <div class="form-row-3" style="margin-top:10px" aria-label="Prioridad y fecha">
         <div>
-          <label>Prioridad</label>
-          <select name="priority">
+          <label for="priority">Prioridad</label>
+          <select id="priority" name="priority">
             <option value="alta">Alta</option>
             <option value="media" selected>Media</option>
             <option value="baja">Baja</option>
           </select>
         </div>
         <div>
-          <label>Fecha</label>
-          <input type="date" name="date">
+          <label for="date">Fecha</label>
+          <input id="date" type="date" name="date">
         </div>
         <div>
-          <label>Hora</label>
-          <input type="time" name="time">
+          <label for="time">Hora</label>
+          <input id="time" type="time" name="time">
         </div>
       </div>
+
       <div style="margin-top:10px">
-        <label>Notas (opcional)</label>
-        <textarea name="notes" rows="4" placeholder="Detalles, lugar, presupuesto, etc."></textarea>
+        <label for="notes">Notas (opcional)</label>
+        <textarea id="notes" name="notes" rows="4" placeholder="Detalles, lugar, presupuesto, etc."></textarea>
       </div>
+
       <div style="margin-top:12px">
         <button class="primary" type="submit">Agregar</button>
       </div>
     </form>
   </div>
 
+  <!-- ========= CALENDARIO O LISTA ========= -->
   <?php if ($view === 'calendario'): ?>
     <?php
       // Incrustar bloques fijos filtrados por usuario en las fechas del calendario
@@ -495,13 +743,13 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
         if (isset($byDate[$d])) usort($byDate[$d],'compare_tasks');
       }
     ?>
-    <div class="card">
+    <div class="card" aria-labelledby="calendario">
       <div class="cal-head">
         <div>
           <?php $prevY=$M===1?$Y-1:$Y; $prevM=$M===1?12:$M-1; $nextY=$M===12?$Y+1:$Y; $nextM=$M===12?1:$M+1; ?>
-          <a href="?view=calendario&user=<?=h($user)?>&y=<?=$prevY?>&m=<?=$prevM?>">← Mes anterior</a>
+          <a href="?view=calendario&user=<?=h($user)?>&y=<?=$prevY?>&m=<?=$prevM?>" aria-label="Mes anterior">← Mes anterior</a>
         </div>
-        <h3 style="margin:0">
+        <h3 id="calendario" style="margin:0">
           <?php
             if (class_exists('IntlDateFormatter')) {
               $fmt=new IntlDateFormatter('es_CL',IntlDateFormatter::LONG,IntlDateFormatter::NONE,TZ_NAME,NULL,'LLLL y');
@@ -509,43 +757,58 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
             } else { echo sprintf('%02d / %04d',$M,$Y); }
           ?>
         </h3>
-        <div><a href="?view=calendario&user=<?=h($user)?>&y=<?=$nextY?>&m=<?=$nextM?>">Mes siguiente →</a></div>
+        <div><a href="?view=calendario&user=<?=h($user)?>&y=<?=$nextY?>&m=<?=$nextM?>" aria-label="Mes siguiente">Mes siguiente →</a></div>
       </div>
 
-      <div class="weekdays">
+      <div class="weekdays" aria-hidden="true">
         <div>Lun</div><div>Mar</div><div>Mié</div><div>Jue</div><div>Vie</div><div>Sáb</div><div>Dom</div>
       </div>
 
-      <div class="cal-grid">
-        <?php foreach ($grid as $cell): $d=$cell['date']; $in=$cell['in_month']; $isT=$cell['is_today']; $items=$byDate[$d]??[]; usort($items,'compare_tasks'); ?>
-          <div class="cal-cell <?= $in?'':'cal-out' ?> <?= $isT?'cal-today':'' ?>">
+      <div class="cal-grid" role="grid" aria-label="Calendario mensual">
+        <?php foreach ($grid as $cell):
+          $d=$cell['date']; $in=$cell['in_month']; $isT=$cell['is_today']; $items=$byDate[$d]??[];
+          usort($items,'compare_tasks'); ?>
+          <div class="cal-cell <?= $in?'':'cal-out' ?> <?= $isT?'cal-today':'' ?>" role="gridcell" aria-label="<?=h($d)?>">
             <div class="cal-date"><?=h(date('j', strtotime($d)))?></div>
             <div class="cal-list">
               <?php foreach ($items as $it):
                 $cls = ($it['who']==='el'?'el':($it['who']==='ella'?'ella':'ambos'));
                 $label = ($it['_fixed']??false)?'🔒 '.cut($it['title']):cut($it['title']); ?>
-                <div class="cal-pill <?=$cls?>"><?=h($label)?></div>
+                <div class="cal-pill <?=$cls?>" title="<?=h($it['title'])?>"><?=h($label)?></div>
               <?php endforeach; ?>
             </div>
           </div>
         <?php endforeach; ?>
       </div>
     </div>
+
   <?php else: ?>
-    <div class="card">
-      <h3 style="margin-top:0">
+    <!-- ========= LISTA ========= -->
+    <div class="card" aria-labelledby="tareas-lista">
+      <h3 id="tareas-lista" style="margin-top:0">
         Tareas <?= $filter==='todas'?'(todas)':($filter==='hoy'?'de hoy':'de la semana') ?>
         <?php if ($user==='ella'): ?> · <span class="badge tag-ella">Vista: Ella</span><?php endif; ?>
         <?php if ($user==='el'): ?>   · <span class="badge tag-el">Vista: Él</span><?php endif; ?>
       </h3>
 
       <?php
-        // Bloques fijos visibles para la vista actual (hoy/semana)
+        // Bloques fijos visibles para la vista actual (solo hoy/semana)
         $showFixed = ($filter==='hoy' || $filter==='semana');
         if ($showFixed) {
-          $dates = ($filter==='hoy') ? [today()] : (function(){ [$m,$s]=week_range(); $arr=[]; $p=(clone $m); while($p<=$s){$arr[]=$p->format('Y-m-d'); $p->modify('+1 day');} return $arr; })();
+          // Construye la lista de fechas a mostrar (hoy o toda la semana)
+          $dates = ($filter==='hoy')
+            ? [today()]
+            : (function(){
+                [$m,$s]=week_range(); $arr=[]; $p=(clone $m);
+                while($p<=$s){ $arr[]=$p->format('Y-m-d'); $p->modify('+1 day'); }
+                return $arr;
+              })();
+
+          // Reúne y pinta los bloques fijos filtrados por usuario
           $fixedList=[];
-          foreach($dates as $d){ foreach(fixed_blocks_for_date_user($d, $user) as $b){ $fixedList[]=$b; } } // << filtrado por vista
+          foreach($dates as $d){
+            foreach(fixed_blocks_for_date_user($d, $user) as $b){ $fixedList[]=$b; }
+          }
           if ($fixedList) {
             echo '<div class="fixed-wrap">';
             foreach ($fixedList as $fb) {
@@ -568,56 +831,64 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
         <?php endif; ?>
 
         <?php $edit_id = $_GET['edit'] ?? null; ?>
-        <?php foreach ($filtered as $t): $isEditing = ($edit_id && $edit_id===$t['id']); $who = $t['who']; ?>
+        <?php foreach ($filtered as $t):
+          $isEditing = ($edit_id && $edit_id===$t['id']); $who = $t['who']; ?>
           <div class="item<?= $t['status']==='hecho'?' done':'' ?>">
             <div style="flex:1">
               <?php if ($isEditing): ?>
+                <!-- Form de edición inline -->
                 <form method="post">
                   <input type="hidden" name="csrf" value="<?=h($csrf)?>">
                   <input type="hidden" name="action" value="edit">
                   <input type="hidden" name="id" value="<?=h($t['id'])?>">
-                  <div class="form-row">
+
+                  <div class="form-row" aria-label="Editar tarea">
                     <div>
-                      <label>Título *</label>
-                      <input type="text" name="title" required value="<?=h($t['title'])?>">
+                      <label for="title-<?=h($t['id'])?>">Título *</label>
+                      <input id="title-<?=h($t['id'])?>" type="text" name="title" required value="<?=h($t['title'])?>">
                     </div>
                     <div>
-                      <label>¿Para quién?</label>
-                      <select name="who">
+                      <label for="who-<?=h($t['id'])?>">¿Para quién?</label>
+                      <select id="who-<?=h($t['id'])?>" name="who">
                         <option value="ambos" <?=$who==='ambos'?'selected':''?>>Ambos</option>
                         <option value="el"    <?=$who==='el'?'selected':''?>>Él</option>
                         <option value="ella"  <?=$who==='ella'?'selected':''?>>Ella</option>
                       </select>
                     </div>
                   </div>
+
                   <div class="form-row-3" style="margin-top:10px">
                     <div>
-                      <label>Prioridad</label>
-                      <select name="priority">
+                      <label for="prio-<?=h($t['id'])?>">Prioridad</label>
+                      <select id="prio-<?=h($t['id'])?>" name="priority">
                         <option value="alta"  <?=$t['priority']==='alta'?'selected':''?>>Alta</option>
                         <option value="media" <?=$t['priority']==='media'?'selected':''?>>Media</option>
                         <option value="baja"  <?=$t['priority']==='baja'?'selected':''?>>Baja</option>
                       </select>
                     </div>
                     <div>
-                      <label>Fecha</label>
-                      <input type="date" name="date" value="<?=h($t['date'])?>">
+                      <label for="date-<?=h($t['id'])?>">Fecha</label>
+                      <input id="date-<?=h($t['id'])?>" type="date" name="date" value="<?=h($t['date'])?>">
                     </div>
                     <div>
-                      <label>Hora</label>
-                      <input type="time" name="time" value="<?=h($t['time'])?>">
+                      <label for="time-<?=h($t['id'])?>">Hora</label>
+                      <input id="time-<?=h($t['id'])?>" type="time" name="time" value="<?=h($t['time'])?>">
                     </div>
                   </div>
+
                   <div style="margin-top:10px">
-                    <label>Notas</label>
-                    <textarea name="notes" rows="3"><?=h($t['notes'])?></textarea>
+                    <label for="notes-<?=h($t['id'])?>">Notas</label>
+                    <textarea id="notes-<?=h($t['id'])?>" name="notes" rows="3"><?=h($t['notes'])?></textarea>
                   </div>
+
                   <div style="margin-top:12px" class="actions">
                     <button class="primary" type="submit">Guardar</button>
                     <a class="badge" href="?filter=<?=h($filter)?>&view=<?=h($view)?>&user=<?=h($user)?>">Cancelar</a>
                   </div>
                 </form>
+
               <?php else: ?>
+                <!-- Item en modo lectura -->
                 <div class="title"><?=h($t['title'])?></div>
                 <div class="meta" style="margin-top:6px">
                   <span class="badge tag-<?=h($who)?>">Para: <?= $who==='el'?'Él':($who==='ella'?'Ella':'Ambos') ?></span>
@@ -636,6 +907,7 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
               <?php endif; ?>
             </div>
 
+            <!-- Acciones (se apilan en móvil) -->
             <div class="actions">
               <?php if (!$isEditing): ?>
                 <form class="inline" method="post" onsubmit="return confirm('¿Cambiar estado?');">
@@ -659,24 +931,29 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
     </div>
   <?php endif; ?>
 
-  <!-- ======= ADMIN BLOQUES FIJOS ======= -->
-  <div class="card" id="fixed">
-    <h3 style="margin-top:0">Bloques fijos (trabajo, clases) 🔒</h3>
+  <!-- ========= ADMIN BLOQUES FIJOS ========= -->
+  <div class="card" id="fixed" aria-labelledby="admin-fijos">
+    <h3 id="admin-fijos" style="margin-top:0">Bloques fijos (trabajo, clases) 🔒</h3>
 
     <?php if (empty($_SESSION['admin_ok'])): ?>
+      <!-- Login admin -->
       <div class="admin-card">
-        <form method="post" style="max-width:420px">
+        <form method="post" style="max-width:420px" aria-label="Ingreso de PIN admin">
           <input type="hidden" name="csrf" value="<?=h($csrf)?>">
           <input type="hidden" name="action" value="admin_login">
-          <label>PIN de administración</label>
-          <input type="password" name="pin" placeholder="Ingresa el PIN" required>
+          <label for="pin">PIN de administración</label>
+          <input id="pin" type="password" name="pin" placeholder="Ingresa el PIN" required>
           <div style="margin-top:10px">
             <button class="primary" type="submit">Entrar</button>
           </div>
-          <div style="margin-top:8px;color:var(--muted);font-size:12px">Cámbialo en la constante <code>ADMIN_PIN</code> (arriba del archivo).</div>
+          <div style="margin-top:8px;color:var(--muted);font-size:12px">
+            Cámbialo en la constante <code>ADMIN_PIN</code> (arriba del archivo).
+          </div>
         </form>
       </div>
+
     <?php else: ?>
+      <!-- Barra salir admin -->
       <div class="admin-card">
         <form method="post" style="display:inline">
           <input type="hidden" name="csrf" value="<?=h($csrf)?>">
@@ -685,71 +962,79 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
         </form>
       </div>
 
+      <!-- Crear bloque fijo -->
       <div class="admin-card">
         <h4 style="margin:0 0 10px 0">Agregar bloque fijo</h4>
         <form method="post">
           <input type="hidden" name="csrf" value="<?=h($csrf)?>">
           <input type="hidden" name="action" value="fixed_create">
+
           <div class="form-row">
             <div>
-              <label>Título *</label>
-              <input type="text" name="label" required placeholder="Trabajo / Clases Universidad">
+              <label for="label">Título *</label>
+              <input id="label" type="text" name="label" required placeholder="Trabajo / Clases Universidad">
             </div>
             <div>
-              <label>¿Para quién?</label>
-              <select name="who">
+              <label for="who-fixed">¿Para quién?</label>
+              <select id="who-fixed" name="who">
                 <option value="ambos">Ambos</option>
                 <option value="el">Él</option>
                 <option value="ella">Ella</option>
               </select>
             </div>
           </div>
+
           <div class="form-row-3" style="margin-top:10px">
             <div>
-              <label>Hora inicio *</label>
-              <input type="time" name="start" required>
+              <label for="start">Hora inicio *</label>
+              <input id="start" type="time" name="start" required>
             </div>
             <div>
-              <label>Hora fin *</label>
-              <input type="time" name="end" required>
+              <label for="end">Hora fin *</label>
+              <input id="end" type="time" name="end" required>
             </div>
             <div>
-              <label>Lugar (opcional)</label>
-              <input type="text" name="location" placeholder="Oficina / Campus">
+              <label for="location">Lugar (opcional)</label>
+              <input id="location" type="text" name="location" placeholder="Oficina / Campus">
             </div>
           </div>
+
           <div class="form-row" style="margin-top:10px">
             <div>
               <label>Días (elige varios) *</label>
-              <div class="chips">
+              <div class="chips" role="group" aria-label="Días de la semana">
                 <?php
                   $days = [['1','Lunes'],['2','Martes'],['3','Miércoles'],['4','Jueves'],['5','Viernes'],['6','Sábado'],['7','Domingo']];
-                foreach ($days as $d) echo '<label class="chip"><input type="checkbox" name="days[]" value="'.h($d[0]).'"> '.h($d[1]).'</label>';
+                  foreach ($days as $d) {
+                    echo '<label class="chip"><input type="checkbox" name="days[]" value="'.h($d[0]).'"> '.h($d[1]).'</label>';
+                  }
                 ?>
               </div>
             </div>
             <div>
               <label>Rango de fechas (opcional)</label>
               <div class="form-row" style="grid-template-columns:1fr 1fr;gap:8px">
-                <input type="date" name="date_start" placeholder="Desde">
-                <input type="date" name="date_end" placeholder="Hasta">
+                <input type="date" name="date_start" placeholder="Desde" aria-label="Fecha desde">
+                <input type="date" name="date_end" placeholder="Hasta" aria-label="Fecha hasta">
               </div>
               <small class="muted">Déjalo en blanco para que aplique siempre.</small>
             </div>
           </div>
+
           <div style="margin-top:12px">
             <button class="primary" type="submit">Agregar bloque fijo</button>
           </div>
         </form>
       </div>
 
+      <!-- Lista de bloques fijos -->
       <div class="admin-card">
         <h4 style="margin:0 0 10px 0">Lista de bloques fijos</h4>
         <?php $all = fixed_load(); ?>
         <?php if (!$all): ?>
           <div>No hay bloques fijos. Agrega uno arriba.</div>
         <?php else: ?>
-          <table class="table">
+          <table class="table" aria-label="Tabla de bloques fijos">
             <tr><th>Título</th><th>Quién</th><th>Días</th><th>Horario</th><th>Rango</th><th>Lugar</th><th></th></tr>
             <?php
               $names=[1=>'Lun',2=>'Mar',3=>'Mié',4=>'Jue',5=>'Vie',6=>'Sáb',7=>'Dom'];
@@ -779,7 +1064,7 @@ footer{margin:24px 0;color:var(--muted);font-size:12px;text-align:center}
       </div>
     <?php endif; ?>
   </div>
-  <!-- ======= /ADMIN BLOQUES FIJOS ======= -->
+  <!-- ========= /ADMIN BLOQUES FIJOS ========= -->
 
   <footer>
     <?=h(APP_TITLE)?> · PHP plano · Archivos: <code>data/tasks.json</code> / <code>data/fixed.json</code>
